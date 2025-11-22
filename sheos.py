@@ -1,423 +1,457 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import random
-import io
-from datetime import timedelta
+import time
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from streamlit_lottie import st_lottie
+import requests
+from datetime import datetime, timedelta
 
-# ML
+# --- Machine Learning Imports ---
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
 
-# Visualization
-import plotly.express as px
-import plotly.graph_objects as go
-import base64
-import time
-
-# -----------------------
-# Config / Defaults
-# -----------------------
-DEFAULT_CSV_PATH = "surat_weather_Finalv4_3years.csv"  # fallback on disk if user doesn't upload
-PANEL_AREA_M2_DEFAULT = 2.0
-GRID_RATE_DEFAULT = 7.0
-
-LOAD_PROFILE = {
-    "AC (1.5 Ton)":    {"qty": 1, "kwh": 1.5},
-    "Fans":            {"qty": 5, "kwh": 0.075},
-    "LEDs":            {"qty": 10, "kwh": 0.01},
-    "Washing Machine": {"qty": 1, "kwh": 0.5}
-}
-
-st.set_page_config(page_title="Suryashakti AI", page_icon="🌞", layout="wide")
-
-# ---- Styling / header ----
-st.markdown(
-    """
-    <style>
-    .stApp { background: linear-gradient(180deg, #0f172a 0%, #021124 60%); color: #e6eef8; }
-    .card { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(2,6,23,0.6); }
-    .small { font-size: 0.9rem; color: #cfe8ff; }
-    .muted { color: #9fb8d6; font-size: 0.85rem; }
-    </style>
-    """,
-    unsafe_allow_html=True
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="SURYASHAKTI AI",
+    page_icon="☀️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Header row
-col1, col2 = st.columns([3,1])
-with col1:
-    st.markdown("# 🌞 SURYASHAKTI AI — Solar Home Dashboard")
-    st.markdown("<div class='muted'>AI-driven solar generation forecasting, scheduling and ROI simulations — interactive, modern and production-ready UI.</div>", unsafe_allow_html=True)
-with col2:
-    st.markdown("<div style='text-align:right'><small class='muted'>Built for Streamlit • 3D + Plotly • RandomForest</small></div>", unsafe_allow_html=True)
+# --- CUSTOM CSS (Glassmorphism & Modern UI) ---
+st.markdown("""
+<style>
+    /* Main Background */
+    .stApp {
+        background: rgb(15,23,42);
+        background: linear-gradient(160deg, rgba(15,23,42,1) 0%, rgba(30,41,59,1) 50%, rgba(15,23,42,1) 100%);
+    }
+    
+    /* Glassmorphism Cards */
+    div.css-1r6slb0.e1tzin5v2, div.stMetric {
+        background-color: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 20px;
+        border-radius: 15px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Headers */
+    h1, h2, h3 {
+        color: #00E5FF !important;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-weight: 700;
+    }
+    
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: rgba(10, 10, 20, 0.9);
+        border-right: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    /* Buttons */
+    div.stButton > button {
+        background: linear-gradient(45deg, #00E5FF, #2979FF);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        transform: scale(1.05);
+        box-shadow: 0 0 15px rgba(0, 229, 255, 0.6);
+    }
+</style>
+""", unsafe_allow_html=True)
 
-st.markdown("")  # spacer
+# --- CONFIGURATION CONSTANTS ---
+PANEL_AREA_M2 = 2.0 
+GRID_RATE = 7.0     
+LOAD_PROFILE = {
+    "AC (1.5 Ton)":     {"qty": 1, "kwh": 1.5},   
+    "Fans":             {"qty": 5, "kwh": 0.075}, 
+    "LEDs":             {"qty": 10, "kwh": 0.01}, 
+    "Washing Machine":  {"qty": 1, "kwh": 0.5}    
+}
 
-# -----------------------
-# Sidebar: Inputs / Upload
-# -----------------------
-with st.sidebar:
-    st.markdown("## Settings & Upload", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Upload weather CSV (timestamp, irradiance_W_m2, temp_C, precipitation_probability_pct)", type=["csv"])
-    use_default = st.checkbox("Use default CSV on disk (if exists)", value=True)
-    panel_count = st.slider("Number of solar panels", min_value=1, max_value=100, value=6)
-    panel_area_m2 = st.number_input("Panel area (m² per panel)", value=PANEL_AREA_M2_DEFAULT, step=0.1)
-    grid_rate = st.number_input("Grid rate (₹ per kWh)", value=GRID_RATE_DEFAULT, step=0.5)
-    st.markdown("---")
-    if st.button("(Re)train / load model"):
-        st.session_state.get("trigger_retrain", False)
-        st.session_state["trigger_retrain"] = not st.session_state.get("trigger_retrain", False)
-    st.markdown("## About")
-    st.markdown("This app trains a RandomForest on a 3-year dataset. It uses a physics-based label (irradiance → power) and then learns to predict power from features. All five options from the original script are provided via the main controls.")
+# --- HELPER FUNCTIONS ---
+def load_lottieurl(url):
+    try:
+        r = requests.get(url)
+        if r.status_code != 200: return None
+        return r.json()
+    except: return None
 
-# -----------------------
-# Utility functions & cached model
-# -----------------------
-def _parse_and_prep(df):
-    # normalize names, parse datetime
-    df = df.copy()
-    df = df.rename(columns={
-        'timestamp': 'datetime',
-        'temp_C': 'temperature_C',
-        'temperature_C': 'temperature_C',
-        'precipitation_probability_pct': 'cloud_percentage',
-        'cloud_percentage': 'cloud_percentage'
-    })
-    if 'datetime' in df.columns:
+@st.cache_data
+def load_data(file):
+    try:
+        raw_df = pd.read_csv(file)
+        raw_df.rename(columns={
+            'timestamp': 'datetime',
+            'temp_C': 'temperature_C', 
+            'precipitation_probability_pct': 'cloud_percentage' 
+        }, inplace=True)
+        
+        df = raw_df[['datetime', 'irradiance_W_m2', 'temperature_C', 'cloud_percentage']].copy()
         try:
             df['datetime'] = pd.to_datetime(df['datetime'], format='%d/%m/%Y %H:%M')
         except:
             df['datetime'] = pd.to_datetime(df['datetime'])
-    else:
-        st.error("CSV must contain a 'datetime' column.")
-        raise RuntimeError("Missing datetime")
+        return df
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+        return None
 
-    # Ensure numeric columns exist
-    for col in ['irradiance_W_m2', 'temperature_C', 'cloud_percentage']:
-        if col not in df.columns:
-            st.error(f"CSV missing required column: {col}")
-            raise RuntimeError("Missing column")
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-    df = df.sort_values('datetime').reset_index(drop=True)
-    return df
+def calculate_physics_generation(row, num_panels):
+    irradiance = row['irradiance_W_m2']
+    cloud = row['cloud_percentage']
+    
+    efficiency = 0.0
+    if 0 <= cloud <= 30: efficiency = 1.0
+    elif 30 < cloud <= 60: efficiency = 0.8
+    elif 60 < cloud <= 90: efficiency = 0.6
+    else: efficiency = 0.2
 
-@st.cache_data(show_spinner=False)
-def load_dataframe(uploaded_file_obj, use_default_flag):
-    # returns dataframe or raises
-    if uploaded_file_obj is not None:
-        df = pd.read_csv(uploaded_file_obj)
-        return _parse_and_prep(df)
-    else:
-        if use_default_flag:
-            try:
-                df = pd.read_csv(DEFAULT_CSV_PATH)
-                return _parse_and_prep(df)
-            except FileNotFoundError:
-                st.warning("Default CSV not found on disk. Please upload a file.")
-                return None
-        else:
-            st.warning("Please upload CSV or enable default CSV.")
-            return None
+    total_area = num_panels * PANEL_AREA_M2
+    power_kw = (irradiance * total_area * efficiency) / 1000.0
+    return max(0.0, power_kw)
 
-@st.cache_data(show_spinner=False)
-def generate_physics_label(df, num_panels, panel_area_m2):
-    df2 = df.copy()
-    # calculate 'hour'
-    df2['hour'] = df2['datetime'].dt.hour
-    def calc(row):
-        irradiance = row['irradiance_W_m2']
-        cloud = row['cloud_percentage']
-        if 0 <= cloud <= 30: efficiency = 1.0
-        elif 30 < cloud <= 60: efficiency = 0.8
-        elif 60 < cloud <= 90: efficiency = 0.6
-        else: efficiency = 0.2
-        total_area = num_panels * panel_area_m2
-        power_kw = (irradiance * total_area * efficiency) / 1000.0
-        return max(0.0, power_kw)
-    df2['power_output'] = df2.apply(calc, axis=1)
-    return df2
-
-@st.cache_resource(show_spinner=False)
-def train_model(df_with_labels):
-    # features & target
-    X = df_with_labels[['irradiance_W_m2', 'temperature_C', 'cloud_percentage', 'hour']].copy()
-    y = df_with_labels['power_output'].copy()
+@st.cache_resource
+def train_model(df, num_panels):
+    training_data = df.copy()
+    training_data['hour'] = training_data['datetime'].dt.hour
+    
+    # Apply physics formula to get ground truth
+    training_data['power_output'] = training_data.apply(lambda x: calculate_physics_generation(x, num_panels), axis=1)
+    
+    features = ['irradiance_W_m2', 'temperature_C', 'cloud_percentage', 'hour']
+    X = training_data[features]
+    y = training_data['power_output']
+    
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    
     X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-    model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
+    
     y_pred = model.predict(X_test)
     r2 = r2_score(y_test, y_pred)
+    
     return model, scaler, r2
 
-def predict_with_model(model, scaler, features_df):
-    X = features_df[['irradiance_W_m2', 'temperature_C', 'cloud_percentage', 'hour']].copy()
-    X_scaled = scaler.transform(X)
-    preds = model.predict(X_scaled)
-    return preds
+# --- MAIN APP LOGIC ---
 
-# -----------------------
-# Load data and train
-# -----------------------
-df = load_dataframe(uploaded_file, use_default)
+def main():
+    # Sidebar Layout
+    with st.sidebar:
+        st.title("⚙️ Configuration")
+        
+        # File Upload
+        uploaded_file = st.file_uploader("Upload Weather CSV", type=['csv'])
+        
+        st.divider()
+        
+        # User Config
+        num_panels = st.number_input("Solar Panels Qty", min_value=1, value=10, step=1)
+        
+        st.divider()
+        st.markdown("### 🔋 System Status")
+        
+        lottie_solar = load_lottieurl("https://assets5.lottiefiles.com/packages/lf20_z3pnisgt.json")
+        if lottie_solar:
+            st_lottie(lottie_solar, height=150, key="sidebar_anim")
+        
+        st.info("Suryashakti AI v2.0 Online")
 
-if df is None:
-    st.stop()
+    # Main Content Area
+    if uploaded_file is not None:
+        df = load_data(uploaded_file)
+        
+        if df is not None:
+            # Initialize Model
+            if 'model_trained' not in st.session_state:
+                with st.spinner('🧠 Initializing AI Core & Training Neural Mesh...'):
+                    model, scaler, accuracy = train_model(df, num_panels)
+                    st.session_state['model'] = model
+                    st.session_state['scaler'] = scaler
+                    st.session_state['accuracy'] = accuracy
+                    st.session_state['model_trained'] = True
+                    time.sleep(1) # Cinematic delay
+            
+            model = st.session_state['model']
+            scaler = st.session_state['scaler']
+            
+            # Header
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.title("🌞 SURYASHAKTI AI")
+                st.markdown(f"#### Advanced Solar Analytics | Model Accuracy: **{st.session_state['accuracy']*100:.2f}%**")
+            with col2:
+                # Simulation Control: Pick a random time index
+                if 'sim_index' not in st.session_state:
+                    st.session_state['sim_index'] = np.random.randint(0, len(df) - (24*31))
+                
+                if st.button("🎲 Randomize Simulation Time"):
+                    st.session_state['sim_index'] = np.random.randint(0, len(df) - (24*31))
+            
+            # Get Current Simulation State
+            idx = st.session_state['sim_index']
+            current_row = df.iloc[idx]
+            current_dt = current_row['datetime']
+            
+            # --- DASHBOARD TABS ---
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "📡 Live Status", 
+                "🤖 AI Forecast", 
+                "🏠 Load Monitor", 
+                "🧠 Smart Scheduler", 
+                "💰 3D Comparative ROI"
+            ])
+            
+            # --- TAB 1: LIVE STATUS ---
+            with tab1:
+                # Predict Current Output
+                input_feat = pd.DataFrame([{
+                    'irradiance_W_m2': current_row['irradiance_W_m2'],
+                    'temperature_C': current_row['temperature_C'],
+                    'cloud_percentage': current_row['cloud_percentage'],
+                    'hour': current_dt.hour
+                }])
+                input_scaled = scaler.transform(input_feat)
+                current_gen = model.predict(input_scaled).item()
+                
+                st.markdown("### 📊 Real-Time Telemetry")
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("📅 Date/Time", current_dt.strftime('%d/%m %H:%M'))
+                m2.metric("⚡ Current Output", f"{current_gen:.3f} kW", delta="Active")
+                m3.metric("☀️ Irradiance", f"{current_row['irradiance_W_m2']} W/m²")
+                m4.metric("☁️ Cloud Cover", f"{current_row['cloud_percentage']}%", delta_color="inverse")
+                
+                # 3D Element: Gauge Chart
+                fig_gauge = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = current_gen,
+                    domain = {'x': [0, 1], 'y': [0, 1]},
+                    title = {'text': "System Load Capacity (kW)"},
+                    gauge = {
+                        'axis': {'range': [0, (num_panels * PANEL_AREA_M2 * 1.2)/1000 * 1000]}, # Rough max
+                        'bar': {'color': "#00E5FF"},
+                        'steps': [
+                            {'range': [0, 1], 'color': 'rgba(255, 255, 255, 0.1)'},
+                            {'range': [1, 5], 'color': 'rgba(255, 255, 255, 0.3)'}
+                        ]
+                    }
+                ))
+                fig_gauge.update_layout(paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"})
+                st.plotly_chart(fig_gauge, use_container_width=True)
 
-# compute labels using physics formula (depends on panel_count & panel_area)
-with st.spinner("Preparing labels & (re)training model if needed..."):
-    df_labeled = generate_physics_label(df, panel_count, panel_area_m2)
+            # --- TAB 2: FORECAST ---
+            with tab2:
+                st.markdown("### 🔮 24-Hour Generation Forecast")
+                
+                start = current_dt.replace(hour=0, minute=0)
+                end = current_dt.replace(hour=23, minute=59)
+                mask = (df['datetime'] >= start) & (df['datetime'] <= end)
+                day_data = df.loc[mask].copy()
+                day_data['hour'] = day_data['datetime'].dt.hour
+                
+                features = day_data[['irradiance_W_m2', 'temperature_C', 'cloud_percentage', 'hour']]
+                day_data['pred_kw'] = model.predict(scaler.transform(features))
+                
+                # Interactive Area Chart
+                fig = px.area(day_data, x='datetime', y='pred_kw', 
+                              title=f"Solar Curve for {start.strftime('%d/%m/%Y')}",
+                              labels={'pred_kw': 'Power (kW)', 'datetime': 'Time'},
+                              color_discrete_sequence=["#00E5FF"])
+                
+                fig.add_vline(x=current_dt, line_width=2, line_dash="dash", line_color="red", annotation_text="NOW")
+                fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", 
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="white")
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Total Prediction
+                st.success(f"📉 Total Energy Expected Today: **{day_data['pred_kw'].sum():.2f} kWh**")
 
-    # Add a small guard to ensure we have enough rows
-    if len(df_labeled) < 100:
-        st.error("Not enough data rows for training.")
-        st.stop()
+            # --- TAB 3: LOAD MONITOR ---
+            with tab3:
+                st.markdown("### 🔌 Dynamic Load Balancing")
+                
+                c1, c2 = st.columns([1, 2])
+                
+                with c1:
+                    user_load = st.slider("Current House Load (kW)", 0.0, 10.0, 1.0, 0.1)
+                    net_energy = user_load - current_gen
+                    
+                    if net_energy > 0:
+                        st.error(f"⚠ Grid Import: {net_energy:.2f} kW")
+                        st.caption(f"Cost: ₹{net_energy*GRID_RATE:.2f}/hr")
+                    else:
+                        st.success(f"✅ Export/Charging: {abs(net_energy):.2f} kW")
+                        
+                with c2:
+                    # Visualizing Flow
+                    vals = [current_gen, user_load]
+                    labs = ["Solar Gen", "Home Load"]
+                    cols = ["#00E5FF", "#FF5252"] if net_energy > 0 else ["#00E5FF", "#69F0AE"]
+                    
+                    fig_pie = go.Figure(data=[go.Pie(labels=labs, values=vals, hole=.6, marker_colors=cols)])
+                    fig_pie.update_layout(
+                        title_text="Energy Balance", 
+                        annotations=[dict(text='NET', x=0.5, y=0.5, font_size=20, showarrow=False)],
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="white")
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Retain training keyed by hash of data + panel_count to retrain when changed
-    # Using cache_resource will keep model in memory between reruns
-    model, scaler, r2 = train_model(df_labeled)
+            # --- TAB 4: SCHEDULER ---
+            with tab4:
+                st.markdown("### 🧠 Intelligent Appliance Scheduler")
+                st.markdown("Based on future weather patterns, here are the best times to run heavy loads (Washing Machine, EV Charging).")
+                
+                end_dt = current_dt + timedelta(hours=24)
+                mask = (df['datetime'] > current_dt) & (df['datetime'] <= end_dt)
+                future_df = df.loc[mask].copy()
+                future_df['hour'] = future_df['datetime'].dt.hour
+                
+                f_feats = future_df[['irradiance_W_m2', 'temperature_C', 'cloud_percentage', 'hour']]
+                future_df['pred'] = model.predict(scaler.transform(f_feats))
+                
+                best_slots = future_df.sort_values('pred', ascending=False).head(3)
+                
+                # Card Layout for Recommendations
+                cols = st.columns(3)
+                for i, (idx, row) in enumerate(best_slots.iterrows()):
+                    with cols[i]:
+                        st.markdown(f"""
+                        <div style="background-color:rgba(0, 229, 255, 0.1); padding:15px; border-radius:10px; border:1px solid #00E5FF; text-align:center;">
+                            <h3>#{i+1} Best Slot</h3>
+                            <h2>{row['datetime'].strftime('%H:%M')}</h2>
+                            <p>Expected Gen: <b>{row['pred']:.2f} kW</b></p>
+                            <p>{row['datetime'].strftime('%d/%m')}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
 
-st.success(f"Model ready — R²: {r2*100:.2f}%")
+            # --- TAB 5: 3D COMPARATIVE ANALYSIS ---
+            with tab5:
+                st.markdown("### 💰 Monthly Financial Projection (30 Days)")
+                
+                with st.spinner("Running Multi-Scenario Simulation..."):
+                    # Calculation Logic (Same as original)
+                    end_sim_dt = current_dt + timedelta(days=30)
+                    mask = (df['datetime'] >= current_dt) & (df['datetime'] < end_sim_dt)
+                    sim_df = df.loc[mask].copy()
+                    sim_df['hour'] = sim_df['datetime'].dt.hour
+                    
+                    sim_feats = sim_df[['irradiance_W_m2', 'temperature_C', 'cloud_percentage', 'hour']]
+                    sim_df['solar_gen'] = model.predict(scaler.transform(sim_feats))
+                    sim_df['date'] = sim_df['datetime'].dt.date
 
-# store in session for main interactions
-st.session_state["df"] = df_labeled
-st.session_state["model"] = model
-st.session_state["scaler"] = scaler
-st.session_state["panel_count"] = panel_count
-st.session_state["panel_area_m2"] = panel_area_m2
-st.session_state["grid_rate"] = grid_rate
+                    bill_A, bill_B, bill_C = 0, 0, 0
+                    
+                    for date, day_group in sim_df.groupby('date'):
+                        peak_sun_idx = day_group['solar_gen'].idxmax()
+                        peak_hour = day_group.loc[peak_sun_idx, 'hour']
+                        
+                        for _, row in day_group.iterrows():
+                            h = row['hour']
+                            solar = row['solar_gen']
+                            
+                            base_load = (LOAD_PROFILE["Fans"]["kwh"] * LOAD_PROFILE["Fans"]["qty"])
+                            if h >= 22 or h < 6: base_load += (LOAD_PROFILE["AC (1.5 Ton)"]["kwh"] * LOAD_PROFILE["AC (1.5 Ton)"]["qty"])
+                            if 18 <= h <= 23: base_load += (LOAD_PROFILE["LEDs"]["kwh"] * LOAD_PROFILE["LEDs"]["qty"])
+                            wm_kwh = LOAD_PROFILE["Washing Machine"]["kwh"]
 
-# -----------------------
-# Main UI: Tabs for options
-# -----------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Live Status", "AI Forecast", "Load Monitor", "Scheduler", "ROI Comparison"])
+                            # A: Grid Only
+                            load_A = base_load + (wm_kwh if h == 20 else 0)
+                            bill_A += (load_A * GRID_RATE)
 
-# Utility to pick a random index (simulate current time from dataset)
-def pick_current_index(df):
-    max_start = len(df) - (24 * 31) - 1
-    if max_start <= 0:
-        return 0
-    return random.randint(0, max_start)
+                            # B: Solar Unoptimized
+                            load_B = base_load + (wm_kwh if h == 20 else 0)
+                            bill_B += (max(0, load_B - solar) * GRID_RATE)
 
-if "current_index" not in st.session_state:
-    st.session_state["current_index"] = pick_current_index(df_labeled)
+                            # C: Solar Optimized
+                            load_C = base_load + (wm_kwh if h == peak_hour else 0)
+                            bill_C += (max(0, load_C - solar) * GRID_RATE)
+                    
+                    # Results Display
+                    st.markdown(f"#### Total Savings Opportunity: **₹{bill_A - bill_C:,.2f}**")
+                    
+                    # 3D Bar Chart Comparison
+                    x_data = ['Grid Only', 'Lazy Solar', 'AI Optimized']
+                    y_data = [bill_A, bill_B, bill_C]
+                    colors = ['#FF5252', '#FFD740', '#69F0AE']
+                    
+                    # Create 3D looking Bar chart (Plotly uses 2D bars but we can style them)
+                    fig_bar = go.Figure(data=[go.Bar(
+                        x=x_data, 
+                        y=y_data,
+                        marker_color=colors,
+                        text=[f"₹{x:,.0f}" for x in y_data],
+                        textposition='auto'
+                    )])
+                    
+                    fig_bar.update_layout(
+                        title="30-Day Cost Projection",
+                        xaxis_title="Scenario",
+                        yaxis_title="Cost (₹)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="white"),
+                        bargap=0.5
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                    
+                    # 3D Element: Surface Plot showing Irradiance Landscape
+                    st.markdown("#### 🌄 Solar Landscape (Time vs Cloud vs Output)")
+                    
+                    # Downsample for performance for 3D plot
+                    plot_df = sim_df.iloc[::4] # Take every 4th point
+                    
+                    fig_3d = go.Figure(data=[go.Mesh3d(
+                        x=plot_df['hour'],
+                        y=plot_df['cloud_percentage'],
+                        z=plot_df['solar_gen'],
+                        opacity=0.8,
+                        color='cyan'
+                    )])
+                    
+                    fig_3d.update_layout(
+                        scene = dict(
+                            xaxis_title='Hour of Day',
+                            yaxis_title='Cloud Cover %',
+                            zaxis_title='Power Gen (kW)',
+                            bgcolor="rgba(0,0,0,0)"
+                        ),
+                        margin=dict(l=0, r=0, b=0, t=0),
+                        paper_bgcolor="rgba(0,0,0,0)",
+                    )
+                    st.plotly_chart(fig_3d, use_container_width=True)
 
-current_row = st.session_state["df"].iloc[st.session_state["current_index"]]
-
-# ----- Tab 1: Live Status -----
-with tab1:
-    st.markdown("### 📡 Live Generation Status")
-    colA, colB = st.columns([3,1])
-    with colA:
-        st.metric("Date & Time", current_row['datetime'].strftime("%d/%m/%Y %H:%M"))
-        st.metric("Temperature (°C)", f"{current_row['temperature_C']:.1f}")
-        st.metric("Clouds (%)", f"{current_row['cloud_percentage']:.0f}")
-        st.metric("Irradiance (W/m²)", f"{current_row['irradiance_W_m2']:.1f}")
-
-        # compute live prediction
-        input_df = pd.DataFrame([{
-            'irradiance_W_m2': current_row['irradiance_W_m2'],
-            'temperature_C': current_row['temperature_C'],
-            'cloud_percentage': current_row['cloud_percentage'],
-            'hour': current_row['datetime'].hour
-        }])
-        gen_kw = predict_with_model(model, scaler, input_df).item()
-        st.metric("Estimated Output (kW)", f"{gen_kw:.3f}", delta=f"{panel_count} panels")
-
-    with colB:
-        # 3D ornament (three.js) embedded for style
-        html_three = """
-        <div id="canvas" style="width:100%;height:220px;"></div>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
-        <script>
-        const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(35, 1.5, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
-        renderer.setSize(320,220);
-        document.getElementById('canvas').appendChild(renderer.domElement);
-        const light = new THREE.DirectionalLight(0xffffff, 1);
-        light.position.set(5,10,7);
-        scene.add(light);
-        const geom = new THREE.BoxGeometry(2,0.05,1);
-        const mat = new THREE.MeshStandardMaterial({color:0x0fb4ff, metalness:0.3, roughness:0.4});
-        const panel = new THREE.Mesh(geom, mat);
-        panel.rotation.x = -0.2;
-        scene.add(panel);
-        camera.position.z = 4;
-        function animate(){ requestAnimationFrame(animate); panel.rotation.y += 0.01; renderer.render(scene, camera); }
-        animate();
-        </script>
-        """
-        st.components.v1.html(html_three, height=240)
-
-    st.markdown("---")
-    st.button("Refresh current timestamp (simulate new now)", on_click=lambda: st.session_state.update({"current_index": pick_current_index(st.session_state["df"])}))
-
-# ----- Tab 2: AI Forecast -----
-with tab2:
-    st.markdown("### 🤖 AI Day Forecast")
-    st.write("Shows hourly predicted generation for the selected date (the current row's date).")
-
-    forecast_date = current_row['datetime'].date()
-    df = st.session_state["df"]
-    start = pd.to_datetime(pd.to_datetime(forecast_date))
-    mask = (df['datetime'].dt.date == forecast_date)
-    day_df = df.loc[mask].copy()
-    day_df['hour'] = day_df['datetime'].dt.hour
-    if day_df.empty:
-        st.warning("No data for this date. Try refreshing current timestamp.")
     else:
-        day_df['pred_kw'] = predict_with_model(model, scaler, day_df[['irradiance_W_m2','temperature_C','cloud_percentage','hour']])
-        # line chart
-        fig = px.line(day_df, x='hour', y='pred_kw', markers=True, title=f"Predicted generation — {forecast_date}")
-        fig.update_layout(yaxis_title="Power (kW)", xaxis_title="Hour of day")
-        st.plotly_chart(fig, use_container_width=True)
+        # Landing Page when no file is uploaded
+        st.container()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.title("SURYASHAKTI AI")
+            st.markdown("### The Future of Home Energy Management")
+            st.write("Please upload the `surat_weather_Finalv4_3years.csv` file in the sidebar to initialize the neural network.")
+        with col2:
+             lottie_welcome = load_lottieurl("https://assets10.lottiefiles.com/packages/lf20_ilp96sd6.json")
+             if lottie_welcome:
+                 st_lottie(lottie_welcome, height=300)
 
-        # interactive table
-        st.dataframe(day_df[['datetime','irradiance_W_m2','temperature_C','cloud_percentage','pred_kw']].rename(columns={
-            'datetime':'Time','irradiance_W_m2':'Irradiance','temperature_C':'Temp (°C)','cloud_percentage':'Clouds (%)','pred_kw':'Pred kW'
-        }), height=300)
-
-        # 3D field: scatter of 24 hours mapped onto a small grid and height = pred_kw
-        fig3d = go.Figure(data=[go.Scatter3d(
-            x=np.cos(2*np.pi*day_df['hour']/24),
-            y=np.sin(2*np.pi*day_df['hour']/24),
-            z=day_df['pred_kw'],
-            mode='markers+lines',
-            marker=dict(size=6),
-            line=dict(color='orange')
-        )])
-        fig3d.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Pred kW'), height=450)
-        st.plotly_chart(fig3d, use_container_width=True)
-
-# ----- Tab 3: Load Monitor -----
-with tab3:
-    st.markdown("### 🏠 Dynamic Load Monitor")
-    st.markdown("Enter a current household load and see net import/export & cost impact.")
-    load_input = st.number_input("Enter current house load (kW)", value=1.0, step=0.1)
-    input_df = pd.DataFrame([{
-        'irradiance_W_m2': current_row['irradiance_W_m2'],
-        'temperature_C': current_row['temperature_C'],
-        'cloud_percentage': current_row['cloud_percentage'],
-        'hour': current_row['datetime'].hour
-    }])
-    gen = predict_with_model(model, scaler, input_df).item()
-    net = load_input - gen
-    if net > 0:
-        st.error(f"⚠ Grid Import: {net:.3f} kW — Cost: ₹{net * grid_rate:.2f} / hr")
-    else:
-        st.success(f"✅ Grid Export / Charging: {abs(net):.3f} kW")
-
-    # small gauge style chart
-    fig_g = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
-        value=gen,
-        delta={'reference': load_input, 'position':'bottom'},
-        gauge={'axis': {'range':[0, max(load_input*1.5, gen*1.5, 5)]}},
-        title={'text': "Estimated Generation (kW)"}
-    ))
-    st.plotly_chart(fig_g, use_container_width=True)
-
-# ----- Tab 4: Scheduler -----
-with tab4:
-    st.markdown("### 🧠 Smart Scheduler — Best hours to run heavy appliances")
-    df_future = df.copy()
-    current_dt = current_row['datetime']
-    end_dt = current_dt + timedelta(hours=24)
-    mask = (df_future['datetime'] > current_dt) & (df_future['datetime'] <= end_dt)
-    future_df = df_future.loc[mask].copy()
-    if future_df.empty:
-        st.warning("No future records in next 24h — try refreshing current index.")
-    else:
-        future_df['hour'] = future_df['datetime'].dt.hour
-        future_df['pred'] = predict_with_model(model, scaler, future_df[['irradiance_W_m2','temperature_C','cloud_percentage','hour']])
-        best_slots = future_df.sort_values('pred', ascending=False).head(3)
-        st.write("Best times to run heavy appliances (top 3):")
-        for _, row in best_slots.iterrows():
-            st.write(f"🕒 {row['datetime'].strftime('%d/%m %H:%M')} — Pred: {row['pred']:.2f} kW")
-        # Bar chart of next 24 hours
-        fig_bar = px.bar(future_df, x='datetime', y='pred', labels={'pred':'Pred kW','datetime':'Time'}, title="Next 24h predicted generation")
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-# ----- Tab 5: Comparative ROI -----
-with tab5:
-    st.markdown("### 💰 Monthly Financial Savings (30 days simulation)")
-    st.write("Compares three scenarios over the next 30 days based on current index as start.")
-    current_dt = current_row['datetime']
-    end_dt = current_dt + timedelta(days=30)
-    mask = (df['datetime'] >= current_dt) & (df['datetime'] < end_dt)
-    sim_df = df.loc[mask].copy()
-    if sim_df.empty:
-        st.warning("Not enough data to run 30-day simulation from the selected current index.")
-    else:
-        sim_df['hour'] = sim_df['datetime'].dt.hour
-        sim_df['solar_gen'] = predict_with_model(model, scaler, sim_df[['irradiance_W_m2','temperature_C','cloud_percentage','hour']])
-        bill_A = 0.0
-        bill_B = 0.0
-        bill_C = 0.0
-
-        sim_df['date'] = sim_df['datetime'].dt.date
-        for date, day_group in sim_df.groupby('date'):
-            peak_idx = day_group['solar_gen'].idxmax()
-            peak_hour = day_group.loc[peak_idx, 'hour']
-            for _, row in day_group.iterrows():
-                h = row['hour']
-                solar = row['solar_gen']
-                hourly_load_base = 0.0
-                hourly_load_base += LOAD_PROFILE["Fans"]["kwh"] * LOAD_PROFILE["Fans"]["qty"]
-                if h >= 22 or h < 6:
-                    hourly_load_base += LOAD_PROFILE["AC (1.5 Ton)"]["kwh"] * LOAD_PROFILE["AC (1.5 Ton)"]["qty"]
-                if 18 <= h <= 23:
-                    hourly_load_base += LOAD_PROFILE["LEDs"]["kwh"] * LOAD_PROFILE["LEDs"]["qty"]
-                wm_kwh = LOAD_PROFILE["Washing Machine"]["kwh"]
-                # Scenario A: Grid only
-                load_A = hourly_load_base
-                if h == 20: load_A += wm_kwh
-                bill_A += load_A * grid_rate
-                # Scenario B: Solar but runs WM at 20:00 (bad timing)
-                load_B = hourly_load_base
-                if h == 20: load_B += wm_kwh
-                net_B = max(0, load_B - solar)
-                bill_B += net_B * grid_rate
-                # Scenario C: Solar optimized — run WM at peak hour
-                load_C = hourly_load_base
-                if h == peak_hour: load_C += wm_kwh
-                net_C = max(0, load_C - solar)
-                bill_C += net_C * grid_rate
-
-        # display
-        colA, colB = st.columns(2)
-        with colA:
-            st.metric("Grid Only (30d)", f"₹{bill_A:,.2f}")
-            st.metric("Solar (Bad Timing)", f"₹{bill_B:,.2f}")
-            st.metric("Solar + AI (Optimized)", f"₹{bill_C:,.2f}")
-        with colB:
-            savings_vs_grid = bill_A - bill_C
-            savings_vs_unopt = bill_B - bill_C
-            st.metric("Savings vs Grid (30d)", f"₹{savings_vs_grid:,.2f}")
-            st.metric("Extra Savings vs Lazy Solar", f"₹{savings_vs_unopt:,.2f}")
-
-        # donut chart
-        fig_pie = go.Figure(data=[go.Pie(labels=['Grid Only','Solar Bad Timing','Solar Optimized'],
-                                         values=[bill_A, bill_B, bill_C], hole=0.45)])
-        fig_pie.update_layout(title="30-day cost comparison")
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-        # offer CSV download summary
-        results = pd.DataFrame({
-            "Scenario": ["Grid Only", "Solar Bad Timing", "Solar Optimized"],
-            "Cost_30d_Rs": [bill_A, bill_B, bill_C]
-        })
-        csv = results.to_csv(index=False).encode('utf-8')
-        st.download_button("Download summary CSV", data=csv, file_name="suryashakti_summary_30d.csv", mime="text/csv")
-
-# -----------------------
-# Footer / tips
-# -----------------------
-st.markdown("---")
-st.markdown("**Tips:** Use the side panel to upload your own CSV. Increase number of panels or panel area in settings to see differences. The 3D ornament is decorative — primary 3D analytics use the Plotly 3D chart for interpretability.")
+if __name__ == "__main__":
+    main()
